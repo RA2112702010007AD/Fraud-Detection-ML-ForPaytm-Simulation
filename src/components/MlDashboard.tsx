@@ -12,9 +12,16 @@ import {
   Layers,
   Flame,
   CheckCircle2,
-  XCircle
+  XCircle,
+  Key,
+  ShieldAlert,
+  Lock,
+  Database,
+  Activity
 } from 'lucide-react';
 import { FeatureName } from '../ml/mlEngine';
+import { SecurityLogEvent } from '../api/apiGateway';
+
 
 interface EvaluationMetrics {
   accuracy: number;
@@ -31,6 +38,12 @@ interface MlDashboardProps {
   setDecisionThreshold: (t: number) => void;
   onRetrain: () => void;
   isRetraining: boolean;
+  retrainError: string | null;
+  retrainCooldown: number;
+  apiKeyStatus: { version: string; maskedKey: string; isKeyConfigured: boolean };
+  onRotateApiKey: () => void;
+  onToggleApiKeyConfig: (fail: boolean) => void;
+  gatewayLogs: SecurityLogEvent[];
 }
 
 export default function MlDashboard({
@@ -39,7 +52,13 @@ export default function MlDashboard({
   decisionThreshold,
   setDecisionThreshold,
   onRetrain,
-  isRetraining
+  isRetraining,
+  retrainError,
+  retrainCooldown,
+  apiKeyStatus,
+  onRotateApiKey,
+  onToggleApiKeyConfig,
+  gatewayLogs
 }: MlDashboardProps) {
   const [simulationLogs, setSimulationLogs] = useState<{ id: number; message: string; type: 'success' | 'warning' | 'info' }[]>([]);
   const [isSimulatingAttacks, setIsSimulatingAttacks] = useState(false);
@@ -138,16 +157,23 @@ export default function MlDashboard({
           </p>
         </div>
 
-        <div style={{ display: 'flex', gap: '0.75rem' }}>
-          <button
-            onClick={onRetrain}
-            className="btn btn-secondary"
-            disabled={isRetraining}
-            style={{ minWidth: '160px' }}
-          >
-            <RefreshCw size={16} className={isRetraining ? 'animate-spin' : ''} style={{ animation: isRetraining ? 'spin 1.5s linear infinite' : 'none' }} />
-            {isRetraining ? 'Retraining...' : 'Retrain Model'}
-          </button>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', alignItems: 'flex-end' }}>
+          <div style={{ display: 'flex', gap: '0.75rem' }}>
+            <button
+              onClick={onRetrain}
+              className="btn btn-secondary"
+              disabled={isRetraining || retrainCooldown > 0}
+              style={{ minWidth: '160px' }}
+            >
+              <RefreshCw size={16} className={isRetraining ? 'animate-spin' : ''} style={{ animation: isRetraining ? 'spin 1.5s linear infinite' : 'none' }} />
+              {retrainCooldown > 0 ? `Cooldown (${retrainCooldown}s)` : isRetraining ? 'Retraining...' : 'Retrain Model'}
+            </button>
+          </div>
+          {retrainError && (
+            <div style={{ fontSize: '0.75rem', color: 'var(--color-danger)', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
+              <ShieldAlert size={12} /> {retrainError}
+            </div>
+          )}
         </div>
       </div>
 
@@ -364,6 +390,140 @@ export default function MlDashboard({
           </div>
         </div>
 
+      </div>
+
+      {/* OWASP API Key Management & Live Gateway Security Logs */}
+      <div className="animate-fade-in" style={{ marginTop: '1rem' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1.25rem' }}>
+          <Database style={{ color: 'var(--color-paytm-cyan)' }} size={20} />
+          <h3 style={{ fontSize: '1.25rem', fontWeight: 600 }}>3. Secure Secret Credentials & Audit logs</h3>
+        </div>
+        
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))',
+          gap: '1.5rem'
+        }}>
+          {/* Key Management Panel */}
+          <div className="glass-panel" style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+            <h4 style={{ fontSize: '1rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.35rem', color: 'var(--color-paytm-cyan)' }}>
+              <Lock size={16} /> API Key Configuration (Backend Server)
+            </h4>
+            
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', fontSize: '0.85rem' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '1px solid var(--border-color)', paddingBottom: '0.5rem' }}>
+                <span style={{ color: 'var(--text-secondary)' }}>Secret Version</span>
+                <strong style={{ color: 'var(--text-primary)' }}>{apiKeyStatus.version}</strong>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '1px solid var(--border-color)', paddingBottom: '0.5rem' }}>
+                <span style={{ color: 'var(--text-secondary)' }}>Active Masked Key</span>
+                <code style={{ color: 'var(--color-purple)', fontSize: '0.75rem', fontFamily: 'monospace' }}>{apiKeyStatus.maskedKey}</code>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '1px solid var(--border-color)', paddingBottom: '0.5rem' }}>
+                <span style={{ color: 'var(--text-secondary)' }}>Proxy Verification</span>
+                <span style={{ 
+                  color: apiKeyStatus.isKeyConfigured ? 'var(--color-success)' : 'var(--color-danger)', 
+                  fontWeight: 600 
+                }}>
+                  {apiKeyStatus.isKeyConfigured ? '✓ Secure & Loaded' : '✗ CONFIG FAILURE'}
+                </span>
+              </div>
+            </div>
+
+            <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', lineHeight: '1.4' }}>
+              <strong>OWASP Practice:</strong> Environment variables (e.g. <code>.env</code> keys) are loaded server-side only. We verify keys inside our secure gateway wrapper, avoiding exposing secrets to the client bundle.
+            </p>
+
+            <div style={{ display: 'flex', gap: '0.5rem', marginTop: 'auto', flexWrap: 'wrap' }}>
+              <button 
+                onClick={onRotateApiKey}
+                className="btn btn-primary"
+                style={{ flexGrow: 1, padding: '0.5rem 1rem', fontSize: '0.8rem', borderRadius: '8px' }}
+              >
+                <RefreshCw size={12} /> Rotate API Key
+              </button>
+              
+              <button 
+                onClick={() => onToggleApiKeyConfig(!apiKeyStatus.isKeyConfigured)}
+                className={`btn ${apiKeyStatus.isKeyConfigured ? 'btn-secondary' : 'btn-primary'}`}
+                style={{ 
+                  flexGrow: 1, 
+                  padding: '0.5rem 1rem', 
+                  fontSize: '0.8rem', 
+                  borderRadius: '8px', 
+                  borderColor: apiKeyStatus.isKeyConfigured ? 'var(--color-danger)' : 'var(--color-success)',
+                  color: apiKeyStatus.isKeyConfigured ? 'var(--color-danger)' : 'var(--color-success)'
+                }}
+              >
+                {apiKeyStatus.isKeyConfigured ? 'Inject Config Failure' : 'Restore Key Config'}
+              </button>
+            </div>
+          </div>
+
+          {/* Audit Logs Visual Console */}
+          <div className="glass-panel" style={{ display: 'flex', flexDirection: 'column', minHeight: '280px', gridColumn: 'span 2' }}>
+            <h4 style={{ fontSize: '1rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.35rem', color: 'var(--color-paytm-cyan)', marginBottom: '0.75rem' }}>
+              <Activity size={16} /> Secure API Gateway Security Audit Logs
+            </h4>
+            
+            <div style={{
+              flexGrow: 1,
+              backgroundColor: '#030712',
+              border: '1px solid var(--border-color)',
+              borderRadius: '10px',
+              padding: '0.75rem',
+              overflowY: 'auto',
+              maxHeight: '240px',
+              fontFamily: 'Consolas, Monaco, Courier New, monospace',
+              fontSize: '0.72rem',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '0.5rem'
+            }}>
+              {gatewayLogs.length === 0 ? (
+                <div style={{ color: 'var(--text-muted)', textAlign: 'center', marginTop: '4rem' }}>
+                  No security alerts generated yet. Perform authentication, submit transactions, or retrain the model to trigger event telemetry.
+                </div>
+              ) : (
+                gatewayLogs.slice(0, 10).map((log, idx) => {
+                  const badgeColor = 
+                    log.eventType === 'INFO' ? '#10b981' :
+                    log.eventType === 'SANITISED' ? '#a78bfa' :
+                    log.eventType === 'API_KEY_ROTATED' ? '#3b82f6' : '#ef4444';
+                  return (
+                    <div key={idx} style={{ 
+                      borderBottom: '1px solid rgba(255,255,255,0.05)', 
+                      paddingBottom: '0.4rem',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: '0.2rem'
+                    }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--text-muted)' }}>
+                        <span>
+                          [{new Date(log.timestamp).toLocaleTimeString()}] IP: {log.ip}
+                        </span>
+                        <span style={{ 
+                          color: badgeColor, 
+                          fontWeight: 700, 
+                          textTransform: 'uppercase', 
+                          padding: '0.05rem 0.35rem', 
+                          borderRadius: '4px',
+                          backgroundColor: 'rgba(255,255,255,0.05)',
+                          fontSize: '0.65rem'
+                        }}>
+                          {log.eventType}
+                        </span>
+                      </div>
+                      <div style={{ color: '#f3f4f6' }}>
+                        <span style={{ color: 'var(--color-paytm-cyan)' }}>{log.endpoint}</span>: {log.message}
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        </div>
       </div>
 
     </div>

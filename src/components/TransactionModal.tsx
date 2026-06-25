@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { X, Send, ShieldCheck, AlertTriangle, ShieldX, Sparkles, RefreshCw } from 'lucide-react';
+import { X, Send, ShieldCheck, AlertTriangle, ShieldX, Sparkles, RefreshCw, ShieldAlert } from 'lucide-react';
 import { TransactionFeatures } from '../ml/mlEngine';
+import { simulatedCreateTransactionEndpoint } from '../api/apiGateway';
 
 interface TransactionModalProps {
   isOpen: boolean;
@@ -10,7 +11,10 @@ interface TransactionModalProps {
   defaultFeatures?: Partial<TransactionFeatures>;
   predictRisk: (features: TransactionFeatures) => number;
   explainRisk: (features: TransactionFeatures) => string[];
+  clientIp: string;
+  userId: string;
 }
+
 
 export default function TransactionModal({
   isOpen,
@@ -19,7 +23,9 @@ export default function TransactionModal({
   defaultCategory,
   defaultFeatures,
   predictRisk,
-  explainRisk
+  explainRisk,
+  clientIp,
+  userId
 }: TransactionModalProps) {
   const [payeeName, setPayeeName] = useState('');
   const [amount, setAmount] = useState(100);
@@ -37,6 +43,21 @@ export default function TransactionModal({
   const [scanResult, setScanResult] = useState<'Approved' | 'Blocked' | null>(null);
   const [reasons, setReasons] = useState<string[]>([]);
   const [liveRisk, setLiveRisk] = useState(0);
+
+  // Security Gateway States
+  const [validationErrors, setValidationErrors] = useState<string[]>([]);
+  const [gatewayError, setGatewayError] = useState<string | null>(null);
+  const [rateLimitCooldown, setRateLimitCooldown] = useState(0);
+
+  // Handle rate-limit cooldown decrement
+  useEffect(() => {
+    if (rateLimitCooldown <= 0) return;
+    const timer = setInterval(() => {
+      setRateLimitCooldown(prev => prev - 1);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [rateLimitCooldown]);
+
 
   // Set default form values when category or initial features change
   useEffect(() => {
@@ -71,8 +92,11 @@ export default function TransactionModal({
       }
       setScanResult(null);
       setIsProcessing(false);
+      setValidationErrors([]);
+      setGatewayError(null);
     }
   }, [isOpen, defaultCategory, defaultFeatures]);
+
 
   // Pack variables into feature structure
   const getFeatures = (): TransactionFeatures => {
@@ -95,23 +119,56 @@ export default function TransactionModal({
 
   if (!isOpen) return null;
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (rateLimitCooldown > 0) return;
+
     setIsProcessing(true);
-    
-    // Simulate transaction security scanning animation
-    setTimeout(() => {
-      const features = getFeatures();
-      const risk = predictRisk(features);
-      const isFraud = risk >= 0.50; // Block if fraud probability is high
-      
-      setScanResult(isFraud ? 'Blocked' : 'Approved');
-      if (isFraud) {
-        setReasons(explainRisk(features));
+    setValidationErrors([]);
+    setGatewayError(null);
+
+    const features = getFeatures();
+
+    // Call simulated backend transaction endpoint
+    const response = await simulatedCreateTransactionEndpoint({
+      ip: clientIp,
+      userId: userId,
+      payload: {
+        payeeName,
+        amount: Number(amount),
+        paymentMode,
+        features
       }
+    });
+
+    // Simulate transaction security scanning animation with backend response mapping
+    setTimeout(() => {
       setIsProcessing(false);
-    }, 2000);
+      if (response.status === 200) {
+        // Gateway validation passed! Now evaluate with the Random Forest ML classifier
+        const risk = predictRisk(features);
+        const isFraud = risk >= 0.50; // Block if fraud probability is high
+        
+        setScanResult(isFraud ? 'Blocked' : 'Approved');
+        if (isFraud) {
+          setReasons(explainRisk(features));
+        }
+      } else if (response.status === 429) {
+        // Rate limited
+        setGatewayError(response.error?.message || 'Transaction limit exceeded.');
+        if (response.rateLimit?.resetSeconds) {
+          setRateLimitCooldown(response.rateLimit.resetSeconds);
+        }
+      } else {
+        // Validation / Auth errors
+        setGatewayError(response.error?.message || 'Security validation rejected this transaction.');
+        if (response.error?.details) {
+          setValidationErrors(response.error.details);
+        }
+      }
+    }, 1800);
   };
+
 
   const handleFinish = () => {
     if (scanResult === 'Approved') {
@@ -417,13 +474,49 @@ export default function TransactionModal({
                 </div>
               </div>
 
+              {/* Gateway security warnings/alerts */}
+              {(gatewayError || validationErrors.length > 0) && (
+                <div style={{
+                  marginTop: '1.25rem',
+                  padding: '1rem',
+                  borderRadius: '12px',
+                  backgroundColor: 'var(--color-danger-bg)',
+                  border: '1px solid rgba(239, 68, 68, 0.2)',
+                  fontSize: '0.85rem'
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--color-danger)', fontWeight: 700 }}>
+                    <ShieldAlert size={18} />
+                    <span>{gatewayError || 'Gateway Security Block'}</span>
+                  </div>
+                  {validationErrors.length > 0 && (
+                    <ul style={{ paddingLeft: '1.25rem', color: 'var(--text-primary)', display: 'flex', flexDirection: 'column', gap: '0.25rem', marginTop: '0.5rem' }}>
+                      {validationErrors.map((err, i) => <li key={i}>{err}</li>)}
+                    </ul>
+                  )}
+                  {rateLimitCooldown > 0 && (
+                    <div style={{ marginTop: '0.5rem', fontWeight: 600, color: 'var(--color-warning)' }}>
+                      Transaction lock active. Retry available in {rateLimitCooldown} seconds.
+                    </div>
+                  )}
+                </div>
+              )}
+
               {/* Action Buttons */}
               <div className="modal-footer" style={{ padding: '1rem 0 0 0', border: 'none' }}>
-                <button type="button" onClick={onClose} className="btn btn-secondary">
+                <button type="button" onClick={onClose} className="btn btn-secondary" disabled={isProcessing}>
                   Cancel
                 </button>
-                <button type="submit" className="btn btn-primary" style={{ minWidth: '150px' }}>
-                  <Send size={16} /> Pay Securely
+                <button 
+                  type="submit" 
+                  className="btn btn-primary" 
+                  style={{ minWidth: '150px' }} 
+                  disabled={rateLimitCooldown > 0 || isProcessing}
+                >
+                  {rateLimitCooldown > 0 ? (
+                    `Limited (${rateLimitCooldown}s)`
+                  ) : (
+                    <><Send size={16} /> Pay Securely</>
+                  )}
                 </button>
               </div>
             </form>

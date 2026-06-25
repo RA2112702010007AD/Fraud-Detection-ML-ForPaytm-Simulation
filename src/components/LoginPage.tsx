@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { 
   ShieldCheck, 
   Lock, 
@@ -15,6 +15,8 @@ import {
   Play
 } from 'lucide-react';
 import { TransactionFeatures } from '../ml/mlEngine';
+import { simulatedLoginEndpoint } from '../api/apiGateway';
+
 
 export interface UserProfile {
   id: string;
@@ -32,14 +34,28 @@ export interface UserProfile {
 
 interface LoginPageProps {
   onLogin: (profile: UserProfile) => void;
+  clientIp: string;
 }
 
-export default function LoginPage({ onLogin }: LoginPageProps) {
+export default function LoginPage({ onLogin, clientIp }: LoginPageProps) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [selectedProfile, setSelectedProfile] = useState<UserProfile | null>(null);
   const [isLoggingIn, setIsLoggingIn] = useState(false);
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [loginDetails, setLoginDetails] = useState<string[]>([]);
+  const [cooldown, setCooldown] = useState(0);
   const loginFormRef = useRef<HTMLDivElement | null>(null);
+
+  // Manage rate limit cooldown lockout timer
+  useEffect(() => {
+    if (cooldown <= 0) return;
+    const timer = setInterval(() => {
+      setCooldown(prev => prev - 1);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [cooldown]);
+
 
   const simulatedProfiles: UserProfile[] = [
     {
@@ -113,19 +129,46 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
     loginFormRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedProfile) {
       alert("Please select a simulated user profile below to log in!");
       return;
     }
+    if (cooldown > 0) return;
+
     setIsLoggingIn(true);
-    
+    setLoginError(null);
+    setLoginDetails([]);
+
+    // Call simulated secure authentication endpoint
+    const response = await simulatedLoginEndpoint({
+      ip: clientIp,
+      payload: {
+        username,
+        password
+      }
+    });
+
+    // Handle authentication response from gateway
     setTimeout(() => {
-      onLogin(selectedProfile);
+      if (response.status === 200) {
+        onLogin(selectedProfile);
+      } else if (response.status === 429) {
+        setLoginError(response.error?.message || 'Too Many Requests');
+        if (response.rateLimit?.resetSeconds) {
+          setCooldown(response.rateLimit.resetSeconds);
+        }
+      } else {
+        setLoginError(response.error?.message || 'Authentication Blocked');
+        if (response.error?.details) {
+          setLoginDetails(response.error.details);
+        }
+      }
       setIsLoggingIn(false);
-    }, 1200);
+    }, 800);
   };
+
 
   return (
     <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', position: 'relative', zIndex: 1 }}>
@@ -280,6 +323,34 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
                   </h3>
                 </div>
 
+                {/* Graceful validation errors or rate limiting (429) alerts */}
+                {loginError && (
+                  <div style={{
+                    backgroundColor: 'var(--color-danger-bg)',
+                    border: '1px solid rgba(239, 68, 68, 0.2)',
+                    padding: '1rem',
+                    borderRadius: '12px',
+                    marginBottom: '1.25rem',
+                    fontSize: '0.85rem'
+                  }}>
+                    <div style={{ color: 'var(--color-danger)', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '0.35rem', marginBottom: '0.25rem' }}>
+                      <ShieldAlert size={16} /> {loginError}
+                    </div>
+                    {loginDetails.length > 0 && (
+                      <ul style={{ paddingLeft: '1.25rem', display: 'flex', flexDirection: 'column', gap: '0.25rem', color: 'var(--text-primary)', marginTop: '0.5rem' }}>
+                        {loginDetails.map((detail, idx) => (
+                          <li key={idx}>{detail}</li>
+                        ))}
+                      </ul>
+                    )}
+                    {cooldown > 0 && (
+                      <div style={{ marginTop: '0.5rem', fontWeight: 600, color: 'var(--color-warning)' }}>
+                        Lockout active. Try again in {cooldown}s.
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 <form onSubmit={handleSubmit}>
                   <div className="form-group" style={{ marginBottom: '1.25rem' }}>
                     <label className="form-label">Secure Handle</label>
@@ -294,6 +365,7 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
                         onChange={(e) => setUsername(e.target.value)}
                         placeholder="select_profile@paytm.security"
                         style={{ paddingLeft: '2.5rem' }}
+                        disabled={cooldown > 0 || isLoggingIn}
                         required 
                       />
                     </div>
@@ -312,6 +384,7 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
                         onChange={(e) => setPassword(e.target.value)}
                         placeholder="••••••••••••"
                         style={{ paddingLeft: '2.5rem' }}
+                        disabled={cooldown > 0 || isLoggingIn}
                         required 
                       />
                     </div>
@@ -321,9 +394,9 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
                     type="submit" 
                     className="btn btn-primary" 
                     style={{ width: '100%', borderRadius: '9999px', gap: '0.5rem', fontSize: '0.95rem' }}
-                    disabled={isLoggingIn}
+                    disabled={isLoggingIn || cooldown > 0}
                   >
-                    {isLoggingIn ? 'Verifying Encrypted Tokens...' : 'Authenticate Securely'}
+                    {cooldown > 0 ? `Brute-force Blocked (${cooldown}s)` : isLoggingIn ? 'Verifying Encrypted Tokens...' : 'Authenticate Securely'}
                     <ArrowRight size={16} />
                   </button>
                 </form>

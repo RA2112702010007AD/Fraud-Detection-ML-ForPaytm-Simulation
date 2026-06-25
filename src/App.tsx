@@ -10,7 +10,16 @@ import {
   TransactionFeatures 
 } from './ml/mlEngine';
 import { generateDataset } from './ml/dataGenerator';
-import { ShieldAlert, X, AlertTriangle } from 'lucide-react';
+import { ShieldAlert, X, AlertTriangle, Globe, ShieldCheck } from 'lucide-react';
+import { 
+  getBackendApiKeyStatus, 
+  rotateBackendApiKey, 
+  simulateApiKeyConfigFailure, 
+  securityLogs, 
+  SecurityLogEvent,
+  simulatedRetrainModelEndpoint
+} from './api/apiGateway';
+
 
 export default function App() {
   const [currentProfile, setCurrentProfile] = useState<UserProfile | null>(null);
@@ -18,6 +27,28 @@ export default function App() {
   const [isDarkMode, setIsDarkMode] = useState(true);
   const [balance, setBalance] = useState(28450);
   const [postpaidBalance, setPostpaidBalance] = useState(4800);
+
+  // Secure Gateway & Client Context States
+  const [clientIp, setClientIp] = useState('192.168.1.100');
+  const [apiKeyStatus, setApiKeyStatus] = useState(getBackendApiKeyStatus());
+  const [gatewayLogs, setGatewayLogs] = useState<SecurityLogEvent[]>([]);
+  const [retrainError, setRetrainError] = useState<string | null>(null);
+  const [retrainCooldown, setRetrainCooldown] = useState(0);
+
+  // Sync state with gateway in real-time
+  const refreshSecurityLogs = () => {
+    setGatewayLogs([...securityLogs]);
+    setApiKeyStatus(getBackendApiKeyStatus());
+  };
+
+  // Cooldown decrement loop
+  useEffect(() => {
+    if (retrainCooldown <= 0) return;
+    const timer = setInterval(() => {
+      setRetrainCooldown(prev => prev - 1);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [retrainCooldown]);
   
   // Model state
   const [rfModel, setRfModel] = useState<RandomForestClassifier | null>(null);
@@ -61,7 +92,9 @@ export default function App() {
   // Train the classifier on load
   useEffect(() => {
     initializeAndTrainModel();
+    refreshSecurityLogs();
   }, []);
+
 
   const initializeAndTrainModel = () => {
     const dataset = generateDataset(1000, 0.15);
@@ -190,16 +223,54 @@ export default function App() {
   const handleLogout = () => {
     setCurrentProfile(null);
     setTransactions([]);
+    refreshSecurityLogs();
   };
 
-  // Retrain handler
-  const handleRetrain = () => {
+  // Retrain handler using secure API gateway trigger
+  const handleRetrain = async () => {
+    if (retrainCooldown > 0) return;
+    setRetrainError(null);
     setIsRetraining(true);
+
+    const email = currentProfile 
+      ? currentProfile.name.toLowerCase().replace(' ', '_') + '@paytm.security' 
+      : 'guest@paytm.security';
+
+    // Call API Gateway retraining endpoint
+    const response = await simulatedRetrainModelEndpoint({
+      ip: clientIp,
+      userId: email,
+      payload: {}
+    });
+
+    refreshSecurityLogs();
+
     setTimeout(() => {
-      initializeAndTrainModel();
       setIsRetraining(false);
+      if (response.status === 200) {
+        initializeAndTrainModel();
+      } else if (response.status === 429) {
+        setRetrainError(response.error?.message || 'Retraining rate limit reached.');
+        if (response.rateLimit?.resetSeconds) {
+          setRetrainCooldown(response.rateLimit.resetSeconds);
+        }
+      } else {
+        setRetrainError(response.error?.message || 'Retrain request rejected.');
+      }
     }, 1500);
   };
+
+  // API Key operations handled through backend simulation
+  const handleRotateApiKey = () => {
+    rotateBackendApiKey();
+    refreshSecurityLogs();
+  };
+
+  const handleToggleApiKeyConfig = (fail: boolean) => {
+    simulateApiKeyConfigFailure(fail);
+    refreshSecurityLogs();
+  };
+
 
   // Pre-predict risk
   const handlePredictRisk = (features: TransactionFeatures): number => {
@@ -248,6 +319,7 @@ export default function App() {
     };
 
     setTransactions(prev => [newTx, ...prev]);
+    refreshSecurityLogs();
 
     if (isApproved) {
       if (data.paymentMode === 'Paytm Postpaid') {
@@ -257,6 +329,7 @@ export default function App() {
       }
     }
   };
+
 
   const handleOpenTransaction = (category: string, overrideFeatures?: Partial<TransactionFeatures>) => {
     setDefaultTxCategory(category);
@@ -275,10 +348,11 @@ export default function App() {
     return (
       <>
         <LiveWallpaper isDarkMode={isDarkMode} />
-        <LoginPage onLogin={handleLogin} />
+        <LoginPage onLogin={handleLogin} clientIp={clientIp} />
       </>
     );
   }
+
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh', backgroundColor: 'var(--bg-primary)' }}>
@@ -296,8 +370,73 @@ export default function App() {
         onLogout={handleLogout}
       />
 
+      {/* Interactive Security Status Console */}
+      <div style={{
+        backgroundColor: 'var(--bg-secondary)',
+        borderBottom: '1px solid var(--border-color)',
+        padding: '0.75rem 0',
+        fontSize: '0.82rem',
+        position: 'relative',
+        zIndex: 40
+      }}>
+        <div className="container" style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          flexWrap: 'wrap',
+          gap: '1rem'
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--text-secondary)' }}>
+            <ShieldCheck size={16} style={{ color: apiKeyStatus.isKeyConfigured ? 'var(--color-success)' : 'var(--color-danger)' }} />
+            <span>Secure Proxy Status:</span>
+            <span style={{ color: apiKeyStatus.isKeyConfigured ? 'var(--color-success)' : 'var(--color-danger)', fontWeight: 700 }}>
+              {apiKeyStatus.isKeyConfigured ? '✓ ACTIVE & VERIFIED' : '✗ CONFIGURATION EXCEPTION'}
+            </span>
+          </div>
+          
+          <div style={{ display: 'flex', alignItems: 'center', gap: '1.25rem', flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', color: 'var(--text-secondary)' }}>
+              <Globe size={14} />
+              <span>Simulated IP:</span>
+              <strong style={{ color: 'var(--text-primary)', fontFamily: 'monospace' }}>{clientIp}</strong>
+              
+              <button 
+                onClick={() => {
+                  const ips = ['192.168.1.100', '10.0.45.12', '172.16.254.89'];
+                  const nextIndex = (ips.indexOf(clientIp) + 1) % ips.length;
+                  setClientIp(ips[nextIndex]);
+                  refreshSecurityLogs();
+                }}
+                className="btn btn-secondary"
+                style={{
+                  padding: '0.2rem 0.5rem',
+                  fontSize: '0.7rem',
+                  borderRadius: '6px',
+                  border: '1px solid var(--border-color)',
+                  marginLeft: '0.25rem',
+                  cursor: 'pointer'
+                }}
+                title="Toggle client IP to bypass IP rate limits"
+              >
+                Switch IP
+              </button>
+            </div>
+
+            {currentProfile && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', color: 'var(--text-secondary)', borderLeft: '1px solid var(--border-color)', paddingLeft: '1.25rem' }}>
+                <span>User Session:</span>
+                <strong style={{ color: 'var(--color-paytm-cyan)', fontFamily: 'monospace' }}>
+                  {currentProfile.name.toLowerCase().replace(' ', '_') + '@paytm.security'}
+                </strong>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
       {/* Main Grid layout */}
       <main className="container" style={{ flexGrow: 1, padding: '2rem 1.5rem' }}>
+
         {activeTab === 'wallet' ? (
           <WalletDashboard 
             balance={balance}
@@ -315,6 +454,12 @@ export default function App() {
             setDecisionThreshold={setDecisionThreshold}
             onRetrain={handleRetrain}
             isRetraining={isRetraining}
+            retrainError={retrainError}
+            retrainCooldown={retrainCooldown}
+            apiKeyStatus={apiKeyStatus}
+            onRotateApiKey={handleRotateApiKey}
+            onToggleApiKeyConfig={handleToggleApiKeyConfig}
+            gatewayLogs={gatewayLogs}
           />
         )}
       </main>
@@ -340,7 +485,10 @@ export default function App() {
         defaultFeatures={defaultTxFeatures}
         predictRisk={handlePredictRisk}
         explainRisk={handleExplainRisk}
+        clientIp={clientIp}
+        userId={currentProfile ? currentProfile.name.toLowerCase().replace(' ', '_') + '@paytm.security' : ''}
       />
+
 
       {/* Explanations Dialog overlay */}
       {explanationTx && (
